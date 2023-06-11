@@ -1,5 +1,6 @@
 # artifacts
 *.o
 *.exe
+output
 # vscode
 .vscode
