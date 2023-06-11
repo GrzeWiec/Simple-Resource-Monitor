@@ -6,7 +6,6 @@
 #include <string.h>
 #include <unistd.h>
  
-// Driver code
 int main()
 {  
    while(1)
