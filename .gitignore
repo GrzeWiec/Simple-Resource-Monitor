@@ -1,0 +1,5 @@
+# artifacts
+*.o
+*.exe
+# vscode
+.vscode
