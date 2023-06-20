@@ -9,6 +9,8 @@
 #include <pthread.h>
 #include <stdint.h>
 #include <time.h>
+#include <unistd.h>
+#include <signal.h>
 #define OK true
 #define NOT_OK false
 long file_size = 1;
@@ -24,29 +26,38 @@ bool analizer_rdy = false;
 bool reader_status = false;
 bool analizer_status = false;
 bool printer_status = false;
-
+volatile sig_atomic_t done = 0;
+ 
+void term(int signum)
+{
+    done = 1;
+}
 
 void *Reader()
 {   
-    while(1)
+    long page_size = sysconf(_SC_PAGE_SIZE);
+    long read_size = 0;
+    long read_idx = 0;
+    cpu_data_array = (char *)calloc(page_size, sizeof(char));
+    while(!done)
     {
     reader_status = OK;
     fptr = fopen("/proc/stat", "r" );
 
-    long page_size = sysconf(_SC_PAGE_SIZE);
-    cpu_data_array = (char *)calloc(page_size, sizeof(char));
-
     while(pthread_mutex_trylock(&lock_cpu_data) != 0);
-    fread(cpu_data_array, sizeof(char), page_size, fptr);
-    long size = strlen(cpu_data_array);
-    data_size = page_size - size;
-    // printf("Length of string is : %ld, buffer space is %ld\n\n", size, data_size);
-    fread(cpu_data_array, sizeof(char), sizeof(cpu_data_array), fptr);
-    pthread_mutex_unlock(&lock_cpu_data);
 
+    read_idx = 0;
+    do
+    {   
+        fflush(fptr);
+        read_size = fread(&cpu_data_array[read_idx], sizeof(char), page_size, fptr);
+        read_idx += read_size;
+    }while(read_size);
+    data_size = strlen(cpu_data_array);
     fclose(fptr);
+    pthread_mutex_unlock(&lock_cpu_data);
     analizer_rdy = true;
-    sleep(1);
+    sleep(0.1);
     }
     return NULL;
 }
@@ -54,43 +65,45 @@ void *Reader()
 
 void *Analizer()
 {   
+    while(!analizer_rdy);
     analizer_status = OK;
-    static bool if_initialized = false;
-    char * token;
-    if(!if_initialized)
-    {
-        if_initialized = true;
-        for(long i = 2; i < data_size; i++)
-            if((cpu_data_array[i] == 'u')&&(cpu_data_array[i-1] == 'p')&&(cpu_data_array[i-2] == 'c')) 
-                cpu_number++;
-    }
+    
+    while(!analizer_rdy);
+    for(long i = 2; i < data_size; i++)
+        if((cpu_data_array[i] == 'u')&&(cpu_data_array[i-1] == 'p')&&(cpu_data_array[i-2] == 'c')) 
+            cpu_number++;
 
     long sum = 0, idle;
-    char corrector[] = " \n";
+    char corrector[] = " \n\t";
+    char * token;
+    char * ptr_token;
+    char * strtol_ptr = 0;
     float singe_cpu_usage = 0.0;
     cpu_usage_array = (float *)calloc(cpu_number, sizeof(float));
-    while(1)
+    while(!done)
     {
+        ptr_token = NULL;
         analizer_status = OK;
         if(analizer_rdy)
         {
-        analizer_rdy = false;
-        // puts(cpu_data_array);
         while((pthread_mutex_trylock(&lock_cpu_usage) != 0) && (pthread_mutex_trylock(&lock_cpu_data) != 0));
-        token = strtok(cpu_data_array, corrector);
+        token = strtok_r(cpu_data_array, corrector, &ptr_token);
             for(uint8_t cpu_ctr = 0; cpu_ctr < cpu_number; cpu_ctr++)
             {
                 sum = 0;
                 for(uint8_t column_ctr = 0; column_ctr < 10; column_ctr++)
                 {
-                token = strtok(NULL, corrector);
-                // printf("cpu: %d,column: %d,value: %s\n",cpu_ctr,column_ctr,token);
+                token = strtok_r(NULL, corrector, &ptr_token);
+                // printf("cpu: %d,column: %d,value: %s\n", cpu_ctr, column_ctr, token);
+                fflush(stdout);
                 if (token!=NULL)
-                    sum += atol(token);
-                if (column_ctr == 3)
-                    idle = atol(token);
+                    {
+                    sum += strtol(token, &strtol_ptr, 10);
+                    if (column_ctr == 3)
+                        idle = strtol(token, &strtol_ptr, 10);
+                    }
                 }
-                token = strtok(NULL, corrector);
+                token = strtok_r(NULL, corrector, &ptr_token);
                 singe_cpu_usage = (1 - ((float)idle / (float)sum)) * 100;
                 cpu_usage_array[cpu_ctr] = singe_cpu_usage;
                 // if(cpu_ctr == 0)
@@ -102,6 +115,8 @@ void *Analizer()
         pthread_mutex_unlock(&lock_cpu_usage);
         pthread_mutex_unlock(&lock_cpu_data);
         }
+    analizer_rdy = false;
+    sleep(0.1);
     }
     return NULL;
 }
@@ -109,7 +124,7 @@ void *Analizer()
 
 void *Printer()
 {
-    while(1)   
+    while(!done)   
     {   
         printer_status = OK;
         while(pthread_mutex_trylock(&lock_cpu_usage) != 0);
@@ -136,14 +151,16 @@ void *Watchdog()
         printf("Analizer status - %d\n", analizer_status);
         printf("Printer status - %d\n", printer_status);
         printf("Setup failed - exiting the program...\n");
+        fflush(stdout);
         exit(2);
     }
-    while(1)
+    while(!done)
     {
         printf("\nWATCHDOG STATUS\n");
         printf("Reader status - %d\n", reader_status);
         printf("Analizer status - %d\n", analizer_status);
         printf("Printer status - %d\n", printer_status);
+        fflush(stdout);
 
         if(!reader_status + !analizer_status + !printer_status > 0)
         {
@@ -155,23 +172,28 @@ void *Watchdog()
         printer_status = NOT_OK;
         sleep(2);
     }
+    return NULL;
 }
 
 
 void *Logger()
 {
-
-
-
+    return NULL;
 }
 
 
 int main()
 {   
+    struct sigaction action;
+    memset(&action, 0, sizeof(struct sigaction));
+    action.sa_handler = term;
+    sigaction(SIGTERM, &action, NULL);
+
     pthread_t t_Reader_id;
     pthread_t t_Analizer_id;
     pthread_t t_Printer_id;
     pthread_t t_Watchdog_id;
+    pthread_t t_Logger_id;
     
     pthread_mutex_init(&lock_cpu_data, NULL);
     pthread_mutex_init(&lock_cpu_usage, NULL);
@@ -180,12 +202,17 @@ int main()
     pthread_create(&t_Analizer_id, NULL, Analizer, NULL);
     pthread_create(&t_Printer_id, NULL, Printer, NULL);
     pthread_create(&t_Watchdog_id, NULL, Watchdog, NULL);
+    pthread_create(&t_Logger_id, NULL, Logger, NULL);
 
     pthread_join(t_Reader_id, NULL);
     pthread_join(t_Analizer_id, NULL);
     pthread_join(t_Printer_id, NULL);
     pthread_join(t_Watchdog_id, NULL);
+    pthread_join(t_Logger_id, NULL);
 
+    while(!done);
+    pthread_mutex_destroy(&lock_cpu_data);
+    pthread_mutex_destroy(&lock_cpu_usage);
     free(cpu_data_array);
     free(cpu_usage_array);
     return 0;
